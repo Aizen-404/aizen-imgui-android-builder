@@ -1,46 +1,81 @@
 name: Build Native ImGui Android
+
 on:
-  workflow_dispatch:
-  push:
-    branches: [main]
+workflow_dispatch:
+push:
+branches:
+- main
+
 permissions:
-  contents: read
+contents: read
+
+concurrency:
+group: imgui-android-build
+cancel-in-progress: false
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout source with submodules
-        uses: actions/checkout@v4
-        with:
-          repository: Arpitraj02/imgui-android
-          ref: main
-          submodules: recursive
-          path: source
-      - name: Verify ImGui source
-        working-directory: source
-        run: |
-          git submodule status --recursive
-          test -s third_party/imgui/imgui.cpp
-          test -s third_party/imgui/imgui_draw.cpp
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - name: Build debug APK
-        working-directory: source
-        run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-apk
-          path: source/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-      - name: Upload native libraries
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-libraries
-          path: source/app/build/intermediates/**/*.so
-          if-no-files-found: warn
+build:
+name: Build Android APK and Native Libraries
+runs-on: ubuntu-latest
+timeout-minutes: 30
+
+steps:
+  - name: Checkout project and ImGui submodule
+    uses: actions/checkout@v4
+    with:
+      repository: Arpitraj02/imgui-android
+      ref: main
+      path: source
+      submodules: recursive
+      fetch-depth: 1
+
+  - name: Verify required source files
+    working-directory: source
+    shell: bash
+    run: |
+      set -euo pipefail
+      test -f gradlew
+      test -s third_party/imgui/imgui.cpp
+      test -s third_party/imgui/imgui_draw.cpp
+      test -s third_party/imgui/imgui_tables.cpp
+      test -s third_party/imgui/imgui_widgets.cpp
+      echo "ImGui source verification passed."
+
+  - name: Set up Java 17
+    uses: actions/setup-java@v4
+    with:
+      distribution: temurin
+      java-version: '17'
+      cache: gradle
+      cache-dependency-path: source/gradle/wrapper/gradle-wrapper.properties
+
+  - name: Build debug APK
+    working-directory: source
+    shell: bash
+    run: |
+      set -euo pipefail
+      chmod +x gradlew
+      ./gradlew --no-daemon --stacktrace assembleDebug
+
+  - name: Verify APK output
+    shell: bash
+    run: |
+      set -euo pipefail
+      find source/app/build/outputs/apk -type f -name '*.apk' -print -quit | grep -q .
+
+  - name: Upload debug APK
+    uses: actions/upload-artifact@v4
+    with:
+      name: debug-apk
+      path: source/app/build/outputs/apk/**/*.apk
+      if-no-files-found: error
+      retention-days: 14
+
+  - name: Upload native libraries
+    uses: actions/upload-artifact@v4
+    with:
+      name: native-libraries
+      path: source/app/build/intermediates/**/*.so
+      if-no-files-found: warn
+      retention-days: 14
+
