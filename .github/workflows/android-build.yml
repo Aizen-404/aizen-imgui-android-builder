@@ -14,8 +14,13 @@ jobs:
         with:
           repository: Arpitraj02/imgui-android
           ref: main
-          submodules: recursive
           path: source
+      - name: Initialize ImGui submodule
+        working-directory: source
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          test -f third_party/imgui/imgui.cpp
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
