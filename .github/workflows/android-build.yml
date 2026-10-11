@@ -1,0 +1,40 @@
+name: Build Native ImGui Android
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: Arpitraj02/imgui-android
+          ref: main
+          submodules: recursive
+          path: source
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build debug APK
+        working-directory: source
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: source/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+      - name: Upload native libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-libraries
+          path: source/app/build/intermediates/**/*.so
+          if-no-files-found: warn
