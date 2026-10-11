@@ -9,18 +9,19 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout source
+      - name: Checkout source with submodules
         uses: actions/checkout@v4
         with:
           repository: Arpitraj02/imgui-android
           ref: main
+          submodules: recursive
           path: source
-      - name: Initialize ImGui submodule
+      - name: Verify ImGui source
         working-directory: source
         run: |
-          git submodule sync --recursive
-          git submodule update --init --recursive
-          test -f third_party/imgui/imgui.cpp
+          git submodule status --recursive
+          test -s third_party/imgui/imgui.cpp
+          test -s third_party/imgui/imgui_draw.cpp
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
