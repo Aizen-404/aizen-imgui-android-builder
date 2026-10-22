@@ -13,6 +13,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android command-line tools
+        run: |
+          yes | sudo sdkmanager --licenses || true
+          sdkmanager --install "ndk;27.0.12077973"
+
       - name: Clone original project
         uses: actions/checkout@v4
         with:
@@ -20,12 +31,6 @@ jobs:
           ref: main
           path: source
           submodules: recursive
-
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK r27
-        run: sdkmanager "ndk;27.0.12077973"
 
       - name: Build ARM64 library
         working-directory: source
