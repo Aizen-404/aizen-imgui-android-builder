@@ -13,16 +13,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Java
-        uses: actions/setup-java@v4
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v3
         with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Install Android command-line tools
-        run: |
-          yes | sudo sdkmanager --licenses || true
-          sdkmanager --install "ndk;27.0.12077973"
+          packages: 'ndk;27.0.12077973'
 
       - name: Clone original project
         uses: actions/checkout@v4
