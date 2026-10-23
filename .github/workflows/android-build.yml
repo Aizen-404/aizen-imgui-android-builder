@@ -1,7 +1,6 @@
-
 name: Build ImGui Android Vulkan Hook
 
-'on':
+on:
   workflow_dispatch:
   push:
     branches:
@@ -28,13 +27,15 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 ndk;23.2.8568313 cmake;3.22.1
 
-      - name: Install build tools
+      - name: Install Ninja
         run: |
-          sdkmanager --install "platform-tools" "platforms;android-35" "ndk;23.2.8568313" "cmake;3.22.1"
-          yes | sdkmanager --licenses
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
 
-      - name: Build project
+      - name: Configure project
         working-directory: upstream
         run: |
           test -f CMakeLists.txt
@@ -45,9 +46,12 @@ jobs:
             -DANDROID_PLATFORM=android-24 \
             -DANDROID_STL=c++_static \
             -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --parallel 2
 
-      - name: Upload build files
+      - name: Build project
+        working-directory: upstream
+        run: cmake --build build --parallel 2
+
+      - name: Upload shared libraries
         if: success()
         uses: actions/upload-artifact@v4
         with:
