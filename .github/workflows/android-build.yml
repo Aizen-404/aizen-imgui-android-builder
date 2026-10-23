@@ -36,15 +36,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build
 
-      - name: Fix missing iterator include
+      - name: Fix std size compatibility
         working-directory: upstream
         run: |
-          sed -i '1i#include <iterator>' Menu/Menu.cpp
+          sed -i 's/std::size(pool_sizes)/(sizeof(pool_sizes) \/ sizeof(pool_sizes[0]))/' Menu/Menu.cpp
 
       - name: Configure project
         working-directory: upstream
         run: |
-          test -f CMakeLists.txt
           NDK="$ANDROID_SDK_ROOT/ndk/23.2.8568313"
           cmake -S . -B build -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
