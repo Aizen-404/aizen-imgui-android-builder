@@ -1,45 +1,73 @@
-
-name: Clone and Build Android ImGui
+name: Build ImGui Android Vulkan Hook
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [main, master]
+workflow_dispatch:
+push:
+branches: [main]
+schedule:
+- cron: "0 0 * * 1"
 
 permissions:
-  contents: read
+contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Android SDK and NDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'ndk;27.0.12077973'
+build:
+runs-on: ubuntu-22.04
+steps:
+- name: Checkout builder repository
+uses: actions/checkout@v4
 
-      - name: Clone original project
-        uses: actions/checkout@v4
-        with:
-          repository: traitimtrongvag/Android-Imgui-Template
-          ref: main
-          path: source
-          submodules: recursive
+  - name: Clone upstream project
+    run: git clone --depth 1 https://github.com/Kaotic/ImGuiAndroidVulkanHook.git upstream
 
-      - name: Build ARM64 library
-        working-directory: source
-        run: |
-          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
-          "$ANDROID_NDK_HOME/ndk-build" \
-            NDK_PROJECT_PATH=app/src/main \
-            APP_BUILD_SCRIPT=app/src/main/jni/Android.mk \
-            NDK_APPLICATION_MK=app/src/main/jni/Application.mk \
-            APP_ABI=arm64-v8a
+  - name: Set up Java
+    uses: actions/setup-java@v4
+    with:
+      distribution: temurin
+      java-version: "17"
 
-      - name: Upload compiled libraries
-        uses: actions/upload-artifact@v4
-        with:
-          name: Android-ImGui-ARM64
-          path: source/app/src/main/libs/**/*.so
-          if-no-files-found: error
-          retention-days: 14
+  - name: Set up Android SDK
+    uses: android-actions/setup-android@v3
+
+  - name: Install Android NDK and CMake
+    run: |
+      sdkmanager --install "ndk;23.2.8568313" "cmake;3.22.1"
+      yes | sdkmanager --licenses
+
+  - name: Verify project dependencies
+    working-directory: upstream
+    run: |
+      test -f CMakeLists.txt
+      test -f Dobby/arm64-v8a/libdobby.a
+      find . -maxdepth 4 -type f | sort | head -200
+
+  - name: Configure and build
+    working-directory: upstream
+    env:
+      ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+    run: |
+      NDK="$ANDROID_SDK_ROOT/ndk/23.2.8568313"
+      cmake -S . -B build -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+        -DANDROID_NDK="$NDK" \
+        -DCMAKE_ANDROID_NDK="$NDK" \
+        -DANDROID_ABI=arm64-v8a \
+        -DANDROID_PLATFORM=android-24 \
+        -DANDROID_STL=c++_static \
+        -DCMAKE_BUILD_TYPE=Release
+      cmake --build build --parallel 2
+
+  - name: Collect shared libraries
+    if: always()
+    run: |
+      mkdir -p artifacts
+      find upstream -type f -name '*.so' -exec cp --parents {} artifacts/ \;
+      find artifacts -type f
+
+  - name: Upload build artifacts
+    if: always()
+    uses: actions/upload-artifact@v4
+    with:
+      name: imgui-android-vulkan-hook-arm64-v8a
+      path: artifacts/
+      if-no-files-found: warn
