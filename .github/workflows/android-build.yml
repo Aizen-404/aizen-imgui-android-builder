@@ -225,7 +225,7 @@ jobs:
             build/native.cpp \
             -L"$GUMJS_LIB" \
             -lfrida-gumjs \
-            -lc++_shared \
+            -lc++_static \
             -llog \
             -landroid \
             -lz \
