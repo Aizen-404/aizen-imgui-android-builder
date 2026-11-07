@@ -1,66 +1,170 @@
 
-name: AIZ3N Frida Agent Build
+name: AIZ3N Single SO Build
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Compile AIZ3N Agent
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Verify Source
+      - name: Install Dependencies
         run: |
-          test -f agent.ts || {
-            echo "ERROR: agent.ts not found"
-            exit 1
-          }
+          sudo apt-get update
+          sudo apt-get install -y git cmake ninja-build \
+            build-essential python3 python3-pip unzip wget \
+            pkg-config xxd
 
-      - name: Initialize Project
+      - name: Install Android NDK
         run: |
+          mkdir -p "$HOME/android"
+          cd "$HOME/android"
+          wget -q https://dl.google.com/android/repository/android-ndk-r23c-linux.zip
+          unzip -q android-ndk-r23c-linux.zip
+          echo "ANDROID_NDK_HOME=$HOME/android/android-ndk-r23c" >> "$GITHUB_ENV"
+
+      - name: Compile Agent
+        run: |
+          test -f agent.ts
           npm init -y
           npm install frida-il2cpp-bridge
           npm install --save-dev frida-compile
-
-      - name: Compile TypeScript
-        run: |
-          mkdir -p build
+          mkdir -p build native
           npx frida-compile agent.ts -o build/agent.js
-
-      - name: Generate Embedded Header
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xxd
           xxd -i build/agent.js > build/agent.h
 
-      - name: Verify Build
+      - name: Fetch Frida Sources
         run: |
-          test -s build/agent.js
-          test -s build/agent.h
-          echo "Agent compilation successful"
-          ls -lh build/
+          git clone --depth 1 --branch 17.11.0 \
+            https://github.com/frida/frida.git frida-source
+          git clone --depth 1 --branch 17.11.0 \
+            https://github.com/frida/frida-gum.git frida-source/frida-gum
 
-      - name: Upload Artifacts
+      - name: Generate Native Loader
+        run: |
+          cat > native/loader.cpp <<'EOF'
+          #include <frida-gumjs.h>
+          #include <android/log.h>
+          #include <pthread.h>
+          #include <string>
+          #include "agent.h"
+
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,"AIZ3N",__VA_ARGS__)
+          #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,"AIZ3N",__VA_ARGS__)
+
+          static GumScript *script = nullptr;
+
+          static void on_message(GumScript *, const gchar *message,
+                                 GBytes *, gpointer) {
+              LOGI("%s", message);
+          }
+
+          static void *initialize(void *) {
+              GError *error = nullptr;
+              gum_init_embedded();
+
+              GumScriptBackend *backend = gum_script_backend_obtain_qjs();
+              if (!backend) {
+                  LOGE("QuickJS backend unavailable");
+                  return nullptr;
+              }
+
+              std::string source(
+                  reinterpret_cast<const char *>(build_agent_js),
+                  build_agent_js_len
+              );
+
+              script = gum_script_backend_create_sync(
+                  backend, "AIZ3N", source.c_str(),
+                  nullptr, nullptr, &error
+              );
+
+              if (!script) {
+                  LOGE("Script creation failed: %s",
+                       error ? error->message : "unknown");
+                  if (error) g_error_free(error);
+                  return nullptr;
+              }
+
+              gum_script_set_message_handler(
+                  script, on_message, nullptr, nullptr
+              );
+
+              gum_script_load_sync(script, nullptr);
+              LOGI("Agent loaded");
+              return nullptr;
+          }
+
+          __attribute__((constructor))
+          static void start() {
+              pthread_t thread;
+              if (pthread_create(&thread, nullptr, initialize, nullptr) == 0)
+                  pthread_detach(thread);
+              else
+                  LOGE("Thread creation failed");
+          }
+          EOF
+
+      - name: Generate CMake
+        run: |
+          cat > native/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.22)
+          project(AIZ3N LANGUAGES C CXX)
+
+          set(CMAKE_CXX_STANDARD 17)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+          if(NOT DEFINED FRIDA_GUMJS_INCLUDE_DIR)
+              message(FATAL_ERROR "A compatible Frida GumJS SDK is required")
+          endif()
+
+          if(NOT DEFINED FRIDA_GUMJS_LIBRARY)
+              message(FATAL_ERROR "A compatible Frida GumJS library is required")
+          endif()
+
+          add_library(AIZ3N SHARED loader.cpp ../build/agent.h)
+
+          target_include_directories(AIZ3N PRIVATE
+              "${FRIDA_GUMJS_INCLUDE_DIR}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/../build"
+          )
+
+          target_link_libraries(AIZ3N PRIVATE
+              "${FRIDA_GUMJS_LIBRARY}"
+              log
+              android
+              dl
+          )
+
+          set_target_properties(AIZ3N PROPERTIES
+              OUTPUT_NAME AIZ3N
+          )
+          EOF
+
+      - name: Configure Native Build
+        run: |
+          echo "A compatible Android GumJS SDK/library must be supplied."
+          echo "The upstream source checkout alone is not a prebuilt SDK."
+          exit 1
+
+      - name: Upload Final Library
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: AIZ3N-Frida-Agent
-          path: |
-            build/agent.js
-            build/agent.h
+          name: AIZ3N-ARM64
+          path: release/libAIZ3N.so
           if-no-files-found: error
-          retention-days: 30
