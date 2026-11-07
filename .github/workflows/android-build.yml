@@ -26,7 +26,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
       - name: Setup Android NDK
         id: ndk
@@ -54,9 +53,7 @@ jobs:
 
       - name: Compile JavaScript Agent
         run: |
-          if [ ! -f package.json ]; then
-            npm init -y
-          fi
+          npm init -y
           npm install frida-il2cpp-bridge
           npm install --save-dev frida-compile
           mkdir -p build
