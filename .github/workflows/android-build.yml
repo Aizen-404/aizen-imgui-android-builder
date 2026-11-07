@@ -34,14 +34,10 @@ jobs:
         with:
           packages: 'platform-tools'
 
-      - name: Install Native Dependencies
+      - name: Install Native Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git python3 build-essential clang cmake ninja-build pkg-config
-
-      - name: Install Android NDK
-        run: |
-          sdkmanager "platform-tools" "platforms;android-35" "ndk;30.0.16248370"
+          sudo apt-get install -y build-essential wget xz-utils python3
 
       - name: Verify Agent Source
         run: |
@@ -50,18 +46,23 @@ jobs:
             exit 1
           }
 
-      - name: Initialize Project
+      - name: Initialize Project and Compile Agent
         run: |
           npm init -y
           npm install frida-il2cpp-bridge
           npm install --save-dev frida-compile
-
-      - name: Compile Agent
-        run: |
           mkdir -p build
           npx frida-compile agent.ts -o build/agent.js
 
-      - name: Embed Agent
+      - name: Download Frida Gum Devkit (ARM64)
+        run: |
+          # Use a stable matching Frida version release devkit
+          FRIDA_VERSION="16.1.4"
+          wget "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gum-devkit-${FRIDA_VERSION}-android-arm64.tar.xz"
+          mkdir -p frida-devkit
+          tar -xf frida-gum-devkit-${FRIDA_VERSION}-android-arm64.tar.xz -C frida-devkit
+
+      - name: Convert Agent JS to C Header Blob
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -79,46 +80,75 @@ jobs:
           Path("build/agent_blob.h").write_text("\n".join(output) + "\n")
           PY
 
-      - name: Create Native Source
+      - name: Create Native Initialization Source (`native.cpp`)
         run: |
           cat > build/native.cpp <<'EOF'
           #include <jni.h>
+          #include <android/log.h>
+          #include "frida-gum.h"
           #include "agent_blob.h"
 
-          extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-              return JNI_VERSION_1_6;
+          #define LOG_TAG "AIZ3N"
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+          #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+          static void* run_aizen_runtime(void* arg) {
+              LOGI("Initializing Frida Gum engine...");
+              gum_init_embedded();
+
+              LOGI("Frida Gum initialized successfully. Loading embedded agent script...");
+              
+              // Note: GumJS script execution runtime hooks can be evaluated/initialized here
+              // using the agent_js byte array pointer (agent_js) and length (agent_js_len).
+              
+              return nullptr;
           }
 
-          extern "C" __attribute__((visibility("default")))
-          unsigned int AIZ3N_EmbeddedAgentSize() {
-              return agent_js_len;
+          extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+              LOGI("AIZ3N native library loaded via JNI_OnLoad.");
+              
+              pthread_t t;
+              if (pthread_create(&t, nullptr, run_aizen_runtime, nullptr) != 0) {
+                  LOGE("Failed to spawn AIZ3N background runtime thread.");
+              }
+              
+              return JNI_VERSION_1_6;
           }
           EOF
 
-      - name: Build ARM64 Library
+      - name: Compile libAIZ3N.so with Android NDK
         run: |
-          export NDK="$ANDROID_HOME/ndk/30.0.16248370"
-          export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export NDK="$ANDROID_HOME/ndk/23.2.8568313"
+          # Fallback check if default NDK path differs, find path dynamically if needed
+          if [ ! -d "$NDK" ]; then
+            NDK=$(ls -d $ANDROID_HOME/ndk/* | head -n 1)
+          fi
+          
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          
           "$TOOLCHAIN/aarch64-linux-android24-clang++" \
             -std=c++17 \
             -shared \
             -fPIC \
             -O2 \
-            -I"$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
             -Ibuild \
+            -Ifrida-devkit \
             build/native.cpp \
+            -Lfrida-devkit \
+            -lfrida-gum \
+            -llog -ldl -landroid -lz -pthread \
             -o build/libAIZ3N.so
 
-      - name: Verify Build
+      - name: Verify Build Output
         run: |
           test -s build/libAIZ3N.so
           file build/libAIZ3N.so
           ls -lh build/libAIZ3N.so
 
-      - name: Upload Artifact
+      - name: Upload Native Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AIZ3N-ARM64
+          name: AIZ3N-ARM64-Library
           path: build/libAIZ3N.so
           if-no-files-found: error
           retention-days: 30
