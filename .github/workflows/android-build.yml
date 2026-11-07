@@ -1,5 +1,5 @@
 
-name: AIZ3N Single SO Build
+name: AIZ3N ARM64
 
 on:
   workflow_dispatch:
@@ -30,19 +30,22 @@ jobs:
           sudo apt-get install -y \
             git curl wget unzip xz-utils \
             build-essential cmake ninja-build \
-            python3 python3-pip pkg-config xxd
+            python3 python3-pip pkg-config
 
-      - name: Install Android NDK
+      - name: Install Android NDK r23c
         run: |
           mkdir -p "$HOME/android"
           cd "$HOME/android"
+
           wget -q https://dl.google.com/android/repository/android-ndk-r23c-linux.zip
           unzip -q android-ndk-r23c-linux.zip
+
           echo "ANDROID_NDK_HOME=$HOME/android/android-ndk-r23c" >> "$GITHUB_ENV"
 
       - name: Compile TypeScript Agent
         run: |
           test -f agent.ts
+
           npm init -y
           npm install frida-il2cpp-bridge
           npm install --save-dev frida-compile
@@ -51,7 +54,27 @@ jobs:
 
           npx frida-compile agent.ts -o build/agent.js
 
-          xxd -i -n aiz3n_agent_js build/agent.js > build/agent.h
+          test -s build/agent.js
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          data = Path("build/agent.js").read_bytes()
+
+          with open("build/agent.h", "w") as f:
+              f.write("#pragma once\n")
+              f.write("#include <stddef.h>\n")
+              f.write("static const unsigned char aiz3n_agent_js[] = {\n")
+
+              for i in range(0, len(data), 16):
+                  chunk = data[i:i + 16]
+                  f.write("    " + ", ".join(f"0x{x:02x}" for x in chunk) + ",\n")
+
+              f.write("};\n")
+              f.write(f"static const unsigned int aiz3n_agent_js_len = {len(data)};\n")
+          PY
+
+          test -s build/agent.h
 
       - name: Download Frida GumJS Devkit
         run: |
@@ -65,14 +88,11 @@ jobs:
           tar -xJf "$HOME/frida-gumjs/devkit.tar.xz" \
             -C "$HOME/frida-gumjs"
 
-          HEADER=$(find "$HOME/frida-gumjs" \
-            -type f -name frida-gumjs.h -print -quit)
-
-          LIBRARY=$(find "$HOME/frida-gumjs" \
-            -type f -name libfrida-gumjs.a -print -quit)
+          HEADER=$(find "$HOME/frida-gumjs" -type f -name frida-gumjs.h -print -quit)
+          LIBRARY=$(find "$HOME/frida-gumjs" -type f -name libfrida-gumjs.a -print -quit)
 
           if [ -z "$HEADER" ] || [ -z "$LIBRARY" ]; then
-            echo "GumJS devkit files not found"
+            echo "Frida GumJS files not found"
             find "$HOME/frida-gumjs" -type f
             exit 1
           fi
@@ -80,8 +100,8 @@ jobs:
           echo "FRIDA_GUMJS_INCLUDE_DIR=$(dirname "$HEADER")" >> "$GITHUB_ENV"
           echo "FRIDA_GUMJS_LIBRARY=$LIBRARY" >> "$GITHUB_ENV"
 
-          echo "Found header: $HEADER"
-          echo "Found library: $LIBRARY"
+          echo "Header: $HEADER"
+          echo "Library: $LIBRARY"
 
       - name: Generate Native Loader
         run: |
@@ -207,9 +227,6 @@ jobs:
 
       - name: Configure ARM64 Build
         run: |
-          echo "Header: $FRIDA_GUMJS_INCLUDE_DIR"
-          echo "Library: $FRIDA_GUMJS_LIBRARY"
-
           test -f "$FRIDA_GUMJS_INCLUDE_DIR/frida-gumjs.h"
           test -f "$FRIDA_GUMJS_LIBRARY"
 
@@ -226,19 +243,19 @@ jobs:
         run: |
           cmake --build build/native --parallel 2
 
-      - name: Verify Final Library
+      - name: Verify Library
         run: |
-          LIB=build/native/out/libAIZ3N.so
+          LIBRARY="build/native/out/libAIZ3N.so"
 
-          test -s "$LIB"
+          test -s "$LIBRARY"
 
-          file "$LIB"
-          readelf -h "$LIB" | grep -E 'Class:|Machine:'
+          file "$LIBRARY"
+          readelf -h "$LIBRARY" | grep -E 'Class:|Machine:'
 
           mkdir -p release
-          cp "$LIB" release/libAIZ3N.so
+          cp "$LIBRARY" release/libAIZ3N.so
 
-      - name: Upload Final SO Only
+      - name: Upload AIZ3N Library
         uses: actions/upload-artifact@v4
         with:
           name: AIZ3N-ARM64
