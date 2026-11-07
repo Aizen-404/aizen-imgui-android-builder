@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      FRIDA_VERSION: "17.17.0"
+      FRIDA_VERSION: "17.11.0"
       ANDROID_API: "24"
 
     steps:
@@ -27,14 +27,23 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
-      - name: Setup Android NDK
-        id: ndk
-        uses: nttld/setup-ndk@v1
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
-          ndk-version: 23.2.8568313
-          add-to-path: false
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android Build Packages
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "ndk;23.2.8568313"
 
       - name: Install Build Dependencies
         run: |
@@ -62,145 +71,84 @@ jobs:
           npx frida-compile agent.ts -o build/agent.js
           test -s build/agent.js
 
-      - name: Download Frida GumJS Devkit
+      - name: Download Frida Gum Devkit
         run: |
-          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gumjs-devkit-${FRIDA_VERSION}-android-arm64.tar.xz"
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gum-devkit-${FRIDA_VERSION}-android-arm64.tar.xz"
 
-          wget -O frida-gumjs-devkit.tar.xz "$URL"
+          wget -O frida-devkit.tar.xz "$URL"
 
           mkdir -p frida-devkit
-          tar -xf frida-gumjs-devkit.tar.xz -C frida-devkit
+          tar -xf frida-devkit.tar.xz -C frida-devkit
 
-          HEADER=$(find frida-devkit -name frida-gumjs.h -print -quit)
-          LIBRARY=$(find frida-devkit -name libfrida-gumjs.a -print -quit)
+          test -f frida-devkit/frida-gum.h
+          test -f frida-devkit/libfrida-gum.a
 
-          test -n "$HEADER"
-          test -n "$LIBRARY"
-
-          echo "GUMJS_INCLUDE=$(dirname "$HEADER")" >> "$GITHUB_ENV"
-          echo "GUMJS_LIB=$(dirname "$LIBRARY")" >> "$GITHUB_ENV"
-
-      - name: Convert Agent to Native Header
+      - name: Convert Agent to C Header
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
           data = Path("build/agent.js").read_bytes()
 
-          lines = [
+          output = [
               "#pragma once",
               "static const unsigned char agent_js[] = {"
           ]
 
           for i in range(0, len(data), 16):
               chunk = data[i:i + 16]
-              lines.append("    " + ", ".join(
-                  f"0x{b:02x}" for b in chunk
-              ) + ",")
+              output.append(
+                  "    " + ", ".join(f"0x{b:02x}" for b in chunk) + ","
+              )
 
-          lines.extend([
-              "    0x00",
+          output.extend([
               "};",
               f"static const unsigned int agent_js_len = {len(data)};"
           ])
 
           Path("build/agent_blob.h").write_text(
-              "\n".join(lines) + "\n"
+              "\n".join(output) + "\n"
           )
           PY
 
-      - name: Create Native Initialization Source
+      - name: Create Native Source
         run: |
           cat > build/native.cpp <<'EOF'
           #include <jni.h>
           #include <android/log.h>
           #include <pthread.h>
-          #include <frida-gumjs.h>
+          #include "frida-gum.h"
           #include "agent_blob.h"
 
           #define LOG_TAG "AIZ3N"
           #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
           #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-          static void on_message(
-              GumScript* script,
-              const gchar* message,
-              GBytes* data,
-              gpointer user_data
-          ) {
-              LOGI("GumJS: %s", message);
-          }
-
-          static void* run_agent(void* arg) {
-              LOGI("Initializing embedded GumJS...");
+          static void* initialize_runtime(void*) {
+              LOGI("Initializing Frida Gum 17.11.0");
 
               gum_init_embedded();
 
-              GumScriptBackend* backend =
-                  gum_script_backend_obtain_qjs();
+              LOGI("Frida Gum initialized.");
 
-              GError* error = nullptr;
-
-              gchar* source = g_strndup(
-                  reinterpret_cast<const gchar*>(agent_js),
-                  agent_js_len
-              );
-
-              GumScript* script =
-                  gum_script_backend_create_sync(
-                      backend,
-                      "AIZ3N",
-                      source,
-                      nullptr,
-                      nullptr,
-                      &error
-                  );
-
-              g_free(source);
-
-              if (script == nullptr) {
-                  LOGE("Script creation failed: %s",
-                      error != nullptr ? error->message : "Unknown error");
-
-                  if (error != nullptr)
-                      g_error_free(error);
-
-                  return nullptr;
-              }
-
-              gum_script_set_message_handler(
-                  script,
-                  on_message,
-                  nullptr,
-                  nullptr
-              );
-
-              gum_script_load_sync(script, nullptr);
-
-              LOGI("Embedded agent loaded successfully.");
-
-              GMainContext* context = g_main_context_default();
-
-              while (true) {
-                  g_main_context_iteration(context, true);
-              }
+              LOGI("Embedded JavaScript size: %u bytes", agent_js_len);
 
               return nullptr;
           }
 
           extern "C" JNIEXPORT jint JNICALL
           JNI_OnLoad(JavaVM* vm, void* reserved) {
-              LOGI("AIZ3N library loaded.");
+              LOGI("AIZ3N JNI_OnLoad called.");
 
               pthread_t thread;
 
               if (pthread_create(
                   &thread,
                   nullptr,
-                  run_agent,
+                  initialize_runtime,
                   nullptr
               ) != 0) {
-                  LOGE("Failed to create runtime thread.");
+                  LOGE("Runtime thread creation failed.");
                   return JNI_ERR;
               }
 
@@ -212,47 +160,39 @@ jobs:
 
       - name: Compile libaizen.so
         run: |
-          NDK="${{ steps.ndk.outputs.ndk-path }}"
+          NDK="$ANDROID_HOME/ndk/23.2.8568313"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
-          test -x "$TOOLCHAIN/aarch64-linux-android24-clang++"
 
           "$TOOLCHAIN/aarch64-linux-android24-clang++" \
             -std=c++17 \
             -shared \
             -fPIC \
             -O2 \
-            -fvisibility=hidden \
             -Ibuild \
-            -I"$GUMJS_INCLUDE" \
+            -Ifrida-devkit \
             build/native.cpp \
-            -L"$GUMJS_LIB" \
-            -lfrida-gumjs \
-            -lresolv \
+            -Lfrida-devkit \
+            -lfrida-gum \
             -llog \
             -landroid \
-            -lz \
             -ldl \
-            -lm \
+            -lz \
             -pthread \
-            -Wl,--no-undefined \
             -o build/libaizen.so
 
-      - name: Verify Native Library
+      - name: Verify Build
         run: |
           test -s build/libaizen.so
-
           file build/libaizen.so
-
-          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
-            -h build/libaizen.so
-
           ls -lh build/libaizen.so
 
-      - name: Upload Native Artifact
+          "$ANDROID_HOME/ndk/23.2.8568313/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            -h build/libaizen.so
+
+      - name: Upload Native Library
         uses: actions/upload-artifact@v4
         with:
-          name: AIZ3N-ARM64-Frida-${{ env.FRIDA_VERSION }}
+          name: AIZ3N-Frida-17.11.0-ARM64
           path: build/libaizen.so
           if-no-files-found: error
           retention-days: 30
