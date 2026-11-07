@@ -36,10 +36,8 @@ jobs:
         run: |
           mkdir -p "$HOME/android"
           cd "$HOME/android"
-
           wget -q https://dl.google.com/android/repository/android-ndk-r23c-linux.zip
           unzip -q android-ndk-r23c-linux.zip
-
           echo "ANDROID_NDK_HOME=$HOME/android/android-ndk-r23c" >> "$GITHUB_ENV"
 
       - name: Compile TypeScript Agent
@@ -53,7 +51,6 @@ jobs:
           mkdir -p build native
 
           npx frida-compile agent.ts -o build/agent.js
-
           test -s build/agent.js
 
           python3 - <<'PY'
@@ -82,11 +79,8 @@ jobs:
           URL="https://github.com/frida/frida/releases/download/${VERSION}/frida-gumjs-devkit-${VERSION}-android-arm64.tar.xz"
 
           mkdir -p "$HOME/frida-gumjs"
-
           curl -fL "$URL" -o "$HOME/frida-gumjs/devkit.tar.xz"
-
-          tar -xJf "$HOME/frida-gumjs/devkit.tar.xz" \
-            -C "$HOME/frida-gumjs"
+          tar -xJf "$HOME/frida-gumjs/devkit.tar.xz" -C "$HOME/frida-gumjs"
 
           HEADER=$(find "$HOME/frida-gumjs" -type f -name frida-gumjs.h -print -quit)
           LIBRARY=$(find "$HOME/frida-gumjs" -type f -name libfrida-gumjs.a -print -quit)
@@ -118,12 +112,11 @@ jobs:
           static GumScript *g_script = nullptr;
 
           static void on_message(
-              GumScript *,
               const gchar *message,
               GBytes *,
               gpointer
           ) {
-              LOGI("%s", message);
+              LOGI("%s", message ? message : "(empty message)");
           }
 
           static void *initialize(void *) {
@@ -248,7 +241,6 @@ jobs:
           LIBRARY="build/native/out/libAIZ3N.so"
 
           test -s "$LIBRARY"
-
           file "$LIBRARY"
           readelf -h "$LIBRARY" | grep -E 'Class:|Machine:'
 
