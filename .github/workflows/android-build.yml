@@ -1,66 +1,86 @@
-name: AIZ3N Frida ARM64 Build
+name: AIZ3N Native ARM64 Build
 
 on:
-workflow_dispatch:
-push:
-branches:
-- main
+  workflow_dispatch:
+  push:
+  _branches: # Note: keep branches indented properly below push
+    - main
 
 permissions:
-contents: read
+  contents: read
 
 jobs:
-build:
-runs-on: ubuntu-22.04
+  build:
+    name: Prepare AIZ3N Native Engine
+    runs-on: ubuntu-22.04
 
-steps:
-  - name: Checkout project
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-  - name: Install dependencies
-    run: |
-      sudo apt-get update
-      sudo apt-get install -y \
-        git curl wget python3 python3-pip \
-        build-essential clang lld ninja-build \
-        pkg-config libglib2.0-dev \
-        flex bison autoconf automake libtool
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
-  - name: Setup Node.js
-    uses: actions/setup-node@v4
-    with:
-      node-version: 20
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
 
-  - name: Setup Java
-    uses: actions/setup-java@v4
-    with:
-      distribution: temurin
-      java-version: 17
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-  - name: Setup Android SDK
-    uses: android-actions/setup-android@v3
+      - name: Install Native Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 build-essential clang cmake ninja-build pkg-config xxd
 
-  - name: Install Android NDK
-    run: |
-      sdkmanager "platform-tools" "platforms;android-35" "ndk;23.2.8568313"
+      - name: Install Android NDK
+        run: |
+          sdkmanager "platform-tools" "platforms;android-35" "ndk;23.2.8568313"
 
-  - name: Checkout Frida 17.11.0
-    run: |
-      git clone --branch 17.11.0 --recurse-submodules \
-        https://github.com/frida/frida.git frida
+      - name: Verify Agent Source
+        run: |
+          test -f agent.ts || {
+            echo "ERROR: agent.ts not found"
+            exit 1
+          }
 
-  - name: Verify environment
-    run: |
-      node --version
-      npm --version
-      java -version
-      python3 --version
-      git -C frida describe --tags --always
-      ls "$ANDROID_HOME/ndk/23.2.8568313"
+      - name: Initialize Project
+        run: |
+          npm init -y
+          npm install frida-il2cpp-bridge
+          npm install --save-dev frida-compile
 
-  - name: Upload source
-    uses: actions/upload-artifact@v4
-    with:
-      name: AIZ3N-Frida-17.11.0-Source
-      path: frida/
-      retention-days: 3
+      - name: Compile Agent
+        run: |
+          mkdir -p build
+          npx frida-compile agent.ts -o build/agent.js
+          xxd -i build/agent.js > build/agent.h
+
+      - name: Verify ARM64 Toolchain
+        run: |
+          export NDK="$ANDROID_HOME/ndk/23.2.8568313"
+          export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$TOOLCHAIN/aarch64-linux-android24-clang" --version
+          "$TOOLCHAIN/aarch64-linux-android24-clang++" --version
+
+      - name: Verify Build
+        run: |
+          test -s build/agent.js
+          test -s build/agent.h
+          echo "AIZ3N preparation successful"
+          ls -lh build/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIZ3N-Native-ARM64
+          path: |
+            build/agent.js
+            build/agent.h
+          if-no-files-found: error
+          retention-days: 30
+          
