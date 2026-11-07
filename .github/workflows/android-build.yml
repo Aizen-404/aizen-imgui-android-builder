@@ -1,4 +1,4 @@
-name: AIZ3N Native ARM64 Build
+Name: AIZ3N Native ARM64 Build
 
 on:
   workflow_dispatch:
@@ -14,6 +14,10 @@ jobs:
     name: Build AIZ3N Native Library
     runs-on: ubuntu-22.04
 
+    env:
+      FRIDA_VERSION: "17.11.0"
+      ANDROID_API: "24"
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -22,133 +26,232 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - name: Setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
         with:
-          distribution: temurin
-          java-version: 17
+          ndk-version: 23.2.8568313
+          add-to-path: false
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'platform-tools'
-
-      - name: Install Native Build Dependencies
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential wget xz-utils python3
+          sudo apt-get install -y \
+            build-essential \
+            wget \
+            xz-utils \
+            python3 \
+            file
 
       - name: Verify Agent Source
         run: |
-          test -f agent.ts || {
+          test -s agent.ts || {
             echo "ERROR: agent.ts not found"
             exit 1
           }
 
-      - name: Initialize Project and Compile Agent
+      - name: Compile JavaScript Agent
         run: |
           npm init -y
           npm install frida-il2cpp-bridge
           npm install --save-dev frida-compile
           mkdir -p build
           npx frida-compile agent.ts -o build/agent.js
+          test -s build/agent.js
 
-      - name: Download Frida Gum Devkit (ARM64)
+      - name: Download Frida GumJS Devkit
         run: |
-          # Use a stable matching Frida version release devkit
-          FRIDA_VERSION="16.1.4"
-          wget "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gum-devkit-${FRIDA_VERSION}-android-arm64.tar.xz"
-          mkdir -p frida-devkit
-          tar -xf frida-gum-devkit-${FRIDA_VERSION}-android-arm64.tar.xz -C frida-devkit
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gumjs-devkit-${FRIDA_VERSION}-android-arm64.tar.xz"
 
-      - name: Convert Agent JS to C Header Blob
+          wget -O frida-gumjs-devkit.tar.xz "$URL"
+
+          mkdir -p frida-devkit
+          tar -xf frida-gumjs-devkit.tar.xz -C frida-devkit
+
+          HEADER=$(find frida-devkit -name frida-gumjs.h -print -quit)
+          LIBRARY=$(find frida-devkit -name libfrida-gumjs.a -print -quit)
+
+          test -n "$HEADER"
+          test -n "$LIBRARY"
+
+          echo "GUMJS_INCLUDE=$(dirname "$HEADER")" >> "$GITHUB_ENV"
+          echo "GUMJS_LIB=$(dirname "$LIBRARY")" >> "$GITHUB_ENV"
+
+      - name: Convert Agent to Native Header
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
           data = Path("build/agent.js").read_bytes()
-          output = [
+
+          lines = [
               "#pragma once",
               "static const unsigned char agent_js[] = {"
           ]
+
           for i in range(0, len(data), 16):
-              output.append("    " + ", ".join(f"0x{b:02x}" for b in data[i:i + 16]) + ",")
-          output.extend([
+              chunk = data[i:i + 16]
+              lines.append("    " + ", ".join(
+                  f"0x{b:02x}" for b in chunk
+              ) + ",")
+
+          lines.extend([
+              "    0x00",
               "};",
               f"static const unsigned int agent_js_len = {len(data)};"
           ])
-          Path("build/agent_blob.h").write_text("\n".join(output) + "\n")
+
+          Path("build/agent_blob.h").write_text(
+              "\n".join(lines) + "\n"
+          )
           PY
 
-      - name: Create Native Initialization Source (`native.cpp`)
+      - name: Create Native Initialization Source
         run: |
           cat > build/native.cpp <<'EOF'
           #include <jni.h>
           #include <android/log.h>
-          #include "frida-gum.h"
+          #include <pthread.h>
+          #include <frida-gumjs.h>
           #include "agent_blob.h"
 
           #define LOG_TAG "AIZ3N"
           #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
           #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-          static void* run_aizen_runtime(void* arg) {
-              LOGI("Initializing Frida Gum engine...");
+          static void on_message(
+              GumScript* script,
+              const gchar* message,
+              GBytes* data,
+              gpointer user_data
+          ) {
+              LOGI("GumJS: %s", message);
+          }
+
+          static void* run_agent(void* arg) {
+              LOGI("Initializing embedded GumJS...");
+
               gum_init_embedded();
 
-              LOGI("Frida Gum initialized successfully. Loading embedded agent script...");
-              
-              // Note: GumJS script execution runtime hooks can be evaluated/initialized here
-              // using the agent_js byte array pointer (agent_js) and length (agent_js_len).
-              
+              GumScriptBackend* backend =
+                  gum_script_backend_obtain_qjs();
+
+              GError* error = nullptr;
+
+              gchar* source = g_strndup(
+                  reinterpret_cast<const gchar*>(agent_js),
+                  agent_js_len
+              );
+
+              GumScript* script =
+                  gum_script_backend_create_sync(
+                      backend,
+                      "AIZ3N",
+                      source,
+                      nullptr,
+                      nullptr,
+                      &error
+                  );
+
+              g_free(source);
+
+              if (script == nullptr) {
+                  LOGE("Script creation failed: %s",
+                      error != nullptr ? error->message : "Unknown error");
+
+                  if (error != nullptr)
+                      g_error_free(error);
+
+                  return nullptr;
+              }
+
+              gum_script_set_message_handler(
+                  script,
+                  on_message,
+                  nullptr,
+                  nullptr
+              );
+
+              gum_script_load_sync(script, nullptr);
+
+              LOGI("Embedded agent loaded successfully.");
+
+              GMainContext* context = g_main_context_default();
+
+              while (true) {
+                  g_main_context_iteration(context, true);
+              }
+
               return nullptr;
           }
 
-          extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-              LOGI("AIZ3N native library loaded via JNI_OnLoad.");
-              
-              pthread_t t;
-              if (pthread_create(&t, nullptr, run_aizen_runtime, nullptr) != 0) {
-                  LOGE("Failed to spawn AIZ3N background runtime thread.");
+          extern "C" JNIEXPORT jint JNICALL
+          JNI_OnLoad(JavaVM* vm, void* reserved) {
+              LOGI("AIZ3N library loaded.");
+
+              pthread_t thread;
+
+              if (pthread_create(
+                  &thread,
+                  nullptr,
+                  run_agent,
+                  nullptr
+              ) != 0) {
+                  LOGE("Failed to create runtime thread.");
+                  return JNI_ERR;
               }
-              
+
+              pthread_detach(thread);
+
               return JNI_VERSION_1_6;
           }
           EOF
 
-      - name: Compile libAIZ3N.so with Android NDK
+      - name: Compile libaizen.so
         run: |
-          export NDK="$ANDROID_HOME/ndk/23.2.8568313"
-          # Fallback check if default NDK path differs, find path dynamically if needed
-          if [ ! -d "$NDK" ]; then
-            NDK=$(ls -d $ANDROID_HOME/ndk/* | head -n 1)
-          fi
-          
+          NDK="${{ steps.ndk.outputs.ndk-path }}"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          
+
+          test -x "$TOOLCHAIN/aarch64-linux-android24-clang++"
+
           "$TOOLCHAIN/aarch64-linux-android24-clang++" \
             -std=c++17 \
             -shared \
             -fPIC \
             -O2 \
+            -fvisibility=hidden \
             -Ibuild \
-            -Ifrida-devkit \
+            -I"$GUMJS_INCLUDE" \
             build/native.cpp \
-            -Lfrida-devkit \
-            -lfrida-gum \
-            -llog -ldl -landroid -lz -pthread \
-            -o build/libAIZ3N.so
+            -L"$GUMJS_LIB" \
+            -lfrida-gumjs \
+            -lresolv \
+            -llog \
+            -landroid \
+            -lz \
+            -ldl \
+            -lm \
+            -pthread \
+            -Wl,--no-undefined \
+            -o build/libaizen.so
 
-      - name: Verify Build Output
+      - name: Verify Native Library
         run: |
-          test -s build/libAIZ3N.so
-          file build/libAIZ3N.so
-          ls -lh build/libAIZ3N.so
+          test -s build/libaizen.so
+
+          file build/libaizen.so
+
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            -h build/libaizen.so
+
+          ls -lh build/libaizen.so
 
       - name: Upload Native Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AIZ3N-ARM64-Library
-          path: build/libAIZ3N.so
+          name: AIZ3N-ARM64-Frida-${{ env.FRIDA_VERSION }}
+          path: build/libaizen.so
           if-no-files-found: error
           retention-days: 30
