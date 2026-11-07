@@ -4,20 +4,22 @@ name: AIZ3N Single SO Build
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
   build:
+    name: Build AIZ3N ARM64
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -26,8 +28,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git cmake ninja-build build-essential \
-            python3 unzip wget xxd curl pkg-config
+            git curl wget unzip xz-utils \
+            build-essential cmake ninja-build \
+            python3 python3-pip pkg-config xxd
 
       - name: Install Android NDK
         run: |
@@ -37,20 +40,23 @@ jobs:
           unzip -q android-ndk-r23c-linux.zip
           echo "ANDROID_NDK_HOME=$HOME/android/android-ndk-r23c" >> "$GITHUB_ENV"
 
-      - name: Compile TypeScript
+      - name: Compile TypeScript Agent
         run: |
           test -f agent.ts
           npm init -y
           npm install frida-il2cpp-bridge
           npm install --save-dev frida-compile
-          mkdir -p build native
-          npx frida-compile agent.ts -o build/agent.js
-          xxd -i build/agent.js > build/agent.h
 
-      - name: Download Frida GumJS ARM64 Devkit
+          mkdir -p build native
+
+          npx frida-compile agent.ts -o build/agent.js
+
+          xxd -i -n aiz3n_agent_js build/agent.js > build/agent.h
+
+      - name: Download Frida GumJS Devkit
         run: |
           VERSION=17.11.0
-          URL="https://github.com/frida/frida/releases/download/$VERSION/frida-gumjs-devkit-$VERSION-android-arm64.tar.xz"
+          URL="https://github.com/frida/frida/releases/download/${VERSION}/frida-gumjs-devkit-${VERSION}-android-arm64.tar.xz"
 
           mkdir -p "$HOME/frida-gumjs"
 
@@ -59,11 +65,23 @@ jobs:
           tar -xJf "$HOME/frida-gumjs/devkit.tar.xz" \
             -C "$HOME/frida-gumjs"
 
-          test -f "$HOME/frida-gumjs/frida-gumjs.h"
-          test -f "$HOME/frida-gumjs/libfrida-gumjs.a"
+          HEADER=$(find "$HOME/frida-gumjs" \
+            -type f -name frida-gumjs.h -print -quit)
 
-          echo "FRIDA_GUMJS_INCLUDE_DIR=$HOME/frida-gumjs" >> "$GITHUB_ENV"
-          echo "FRIDA_GUMJS_LIBRARY=$HOME/frida-gumjs/libfrida-gumjs.a" >> "$GITHUB_ENV"
+          LIBRARY=$(find "$HOME/frida-gumjs" \
+            -type f -name libfrida-gumjs.a -print -quit)
+
+          if [ -z "$HEADER" ] || [ -z "$LIBRARY" ]; then
+            echo "GumJS devkit files not found"
+            find "$HOME/frida-gumjs" -type f
+            exit 1
+          fi
+
+          echo "FRIDA_GUMJS_INCLUDE_DIR=$(dirname "$HEADER")" >> "$GITHUB_ENV"
+          echo "FRIDA_GUMJS_LIBRARY=$LIBRARY" >> "$GITHUB_ENV"
+
+          echo "Found header: $HEADER"
+          echo "Found library: $LIBRARY"
 
       - name: Generate Native Loader
         run: |
@@ -74,10 +92,10 @@ jobs:
           #include <string>
           #include "agent.h"
 
-          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,"AIZ3N",__VA_ARGS__)
-          #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,"AIZ3N",__VA_ARGS__)
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "AIZ3N", __VA_ARGS__)
+          #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AIZ3N", __VA_ARGS__)
 
-          static GumScript *script = nullptr;
+          static GumScript *g_script = nullptr;
 
           static void on_message(
               GumScript *,
@@ -95,17 +113,17 @@ jobs:
 
               GumScriptBackend *backend = gum_script_backend_obtain_qjs();
 
-              if (!backend) {
+              if (backend == nullptr) {
                   LOGE("QuickJS backend unavailable");
                   return nullptr;
               }
 
               std::string source(
-                  reinterpret_cast<const char *>(build_agent_js),
-                  build_agent_js_len
+                  reinterpret_cast<const char *>(aiz3n_agent_js),
+                  aiz3n_agent_js_len
               );
 
-              script = gum_script_backend_create_sync(
+              g_script = gum_script_backend_create_sync(
                   backend,
                   "AIZ3N",
                   source.c_str(),
@@ -114,9 +132,9 @@ jobs:
                   &error
               );
 
-              if (!script) {
+              if (g_script == nullptr) {
                   LOGE("Script creation failed: %s",
-                      error ? error->message : "unknown");
+                      error ? error->message : "Unknown error");
 
                   if (error)
                       g_error_free(error);
@@ -125,15 +143,15 @@ jobs:
               }
 
               gum_script_set_message_handler(
-                  script,
+                  g_script,
                   on_message,
                   nullptr,
                   nullptr
               );
 
-              gum_script_load_sync(script, nullptr);
+              gum_script_load_sync(g_script, nullptr);
 
-              LOGI("AIZ3N agent loaded");
+              LOGI("AIZ3N script loaded");
 
               return nullptr;
           }
@@ -144,7 +162,7 @@ jobs:
 
               if (pthread_create(&thread, nullptr, initialize, nullptr) == 0) {
                   pthread_detach(thread);
-                  LOGI("Native initialization started");
+                  LOGI("Initialization started");
               } else {
                   LOGE("Thread creation failed");
               }
@@ -161,6 +179,10 @@ jobs:
           set(CMAKE_CXX_STANDARD_REQUIRED ON)
           set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+          if(NOT FRIDA_GUMJS_INCLUDE_DIR OR NOT FRIDA_GUMJS_LIBRARY)
+              message(FATAL_ERROR "Frida GumJS SDK paths missing")
+          endif()
+
           add_library(AIZ3N SHARED loader.cpp)
 
           target_include_directories(AIZ3N PRIVATE
@@ -175,7 +197,6 @@ jobs:
               dl
               m
               z
-              resolv
           )
 
           set_target_properties(AIZ3N PROPERTIES
@@ -184,25 +205,35 @@ jobs:
           )
           EOF
 
-      - name: Build ARM64 Library
+      - name: Configure ARM64 Build
         run: |
+          echo "Header: $FRIDA_GUMJS_INCLUDE_DIR"
+          echo "Library: $FRIDA_GUMJS_LIBRARY"
+
+          test -f "$FRIDA_GUMJS_INCLUDE_DIR/frida-gumjs.h"
+          test -f "$FRIDA_GUMJS_LIBRARY"
+
           cmake -S native -B build/native -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
-            -DANDROID_STL=c++_static
+            -DANDROID_STL=c++_static \
+            -DFRIDA_GUMJS_INCLUDE_DIR="$FRIDA_GUMJS_INCLUDE_DIR" \
+            -DFRIDA_GUMJS_LIBRARY="$FRIDA_GUMJS_LIBRARY"
 
+      - name: Compile Native Library
+        run: |
           cmake --build build/native --parallel 2
 
-      - name: Verify Library
+      - name: Verify Final Library
         run: |
           LIB=build/native/out/libAIZ3N.so
 
           test -s "$LIB"
+
           file "$LIB"
           readelf -h "$LIB" | grep -E 'Class:|Machine:'
-          readelf -d "$LIB"
 
           mkdir -p release
           cp "$LIB" release/libAIZ3N.so
