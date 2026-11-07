@@ -1,124 +1,124 @@
 name: AIZ3N Native ARM64 Build
 
 on:
-workflow_dispatch:
-push:
-branches:
-- main
+  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
-contents: read
+  contents: read
 
 jobs:
-build:
-name: Build AIZ3N Native Library
-runs-on: ubuntu-22.04
+  build:
+    name: Build AIZ3N Native Library
+    runs-on: ubuntu-22.04
 
-steps:
-  - name: Checkout Repository
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-  - name: Setup Node.js
-    uses: actions/setup-node@v4
-    with:
-      node-version: 22
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
-  - name: Setup Java
-    uses: actions/setup-java@v4
-    with:
-      distribution: temurin
-      java-version: 17
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
 
-  - name: Setup Android SDK
-    uses: android-actions/setup-android@v3
-    with:
-      packages: 'platform-tools'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
-  - name: Install Native Dependencies
-    run: |
-      sudo apt-get update
-      sudo apt-get install -y git python3 build-essential clang cmake ninja-build pkg-config
+      - name: Install Native Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 build-essential clang cmake ninja-build pkg-config
 
-  - name: Install Android NDK
-    run: |
-      sdkmanager "platform-tools" "platforms;android-35" "ndk;30.0.16248370"
+      - name: Install Android NDK
+        run: |
+          sdkmanager "platform-tools" "platforms;android-35" "ndk;30.0.16248370"
 
-  - name: Verify Agent Source
-    run: |
-      test -f agent.ts || {
-        echo "ERROR: agent.ts not found"
-        exit 1
-      }
+      - name: Verify Agent Source
+        run: |
+          test -f agent.ts || {
+            echo "ERROR: agent.ts not found"
+            exit 1
+          }
 
-  - name: Initialize Project
-    run: |
-      npm init -y
-      npm install frida-il2cpp-bridge
-      npm install --save-dev frida-compile
+      - name: Initialize Project
+        run: |
+          npm init -y
+          npm install frida-il2cpp-bridge
+          npm install --save-dev frida-compile
 
-  - name: Compile Agent
-    run: |
-      mkdir -p build
-      npx frida-compile agent.ts -o build/agent.js
+      - name: Compile Agent
+        run: |
+          mkdir -p build
+          npx frida-compile agent.ts -o build/agent.js
 
-  - name: Embed Agent
-    run: |
-      python3 - <<'PY'
-      from pathlib import Path
-      data = Path("build/agent.js").read_bytes()
-      output = [
-          "#pragma once",
-          "static const unsigned char agent_js[] = {"
-      ]
-      for i in range(0, len(data), 16):
-          output.append("    " + ", ".join(f"0x{b:02x}" for b in data[i:i + 16]) + ",")
-      output.extend([
-          "};",
-          f"static const unsigned int agent_js_len = {len(data)};"
-      ])
-      Path("build/agent_blob.h").write_text("\n".join(output) + "\n")
-      PY
+      - name: Embed Agent
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          data = Path("build/agent.js").read_bytes()
+          output = [
+              "#pragma once",
+              "static const unsigned char agent_js[] = {"
+          ]
+          for i in range(0, len(data), 16):
+              output.append("    " + ", ".join(f"0x{b:02x}" for b in data[i:i + 16]) + ",")
+          output.extend([
+              "};",
+              f"static const unsigned int agent_js_len = {len(data)};"
+          ])
+          Path("build/agent_blob.h").write_text("\n".join(output) + "\n")
+          PY
 
-  - name: Create Native Source
-    run: |
-      cat > build/native.cpp <<'EOF'
-      #include <jni.h>
-      #include "agent_blob.h"
+      - name: Create Native Source
+        run: |
+          cat > build/native.cpp <<'EOF'
+          #include <jni.h>
+          #include "agent_blob.h"
 
-      extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-          return JNI_VERSION_1_6;
-      }
+          extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+              return JNI_VERSION_1_6;
+          }
 
-      extern "C" __attribute__((visibility("default")))
-      unsigned int AIZ3N_EmbeddedAgentSize() {
-          return agent_js_len;
-      }
-      EOF
+          extern "C" __attribute__((visibility("default")))
+          unsigned int AIZ3N_EmbeddedAgentSize() {
+              return agent_js_len;
+          }
+          EOF
 
-  - name: Build ARM64 Library
-    run: |
-      export NDK="$ANDROID_HOME/ndk/30.0.16248370"
-      export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-      "$TOOLCHAIN/aarch64-linux-android24-clang++" \
-        -std=c++17 \
-        -shared \
-        -fPIC \
-        -O2 \
-        -I"$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
-        -Ibuild \
-        build/native.cpp \
-        -o build/libAIZ3N.so
+      - name: Build ARM64 Library
+        run: |
+          export NDK="$ANDROID_HOME/ndk/30.0.16248370"
+          export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$TOOLCHAIN/aarch64-linux-android24-clang++" \
+            -std=c++17 \
+            -shared \
+            -fPIC \
+            -O2 \
+            -I"$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
+            -Ibuild \
+            build/native.cpp \
+            -o build/libAIZ3N.so
 
-  - name: Verify Build
-    run: |
-      test -s build/libAIZ3N.so
-      file build/libAIZ3N.so
-      ls -lh build/libAIZ3N.so
+      - name: Verify Build
+        run: |
+          test -s build/libAIZ3N.so
+          file build/libAIZ3N.so
+          ls -lh build/libAIZ3N.so
 
-  - name: Upload Artifact
-    uses: actions/upload-artifact@v4
-    with:
-      name: AIZ3N-ARM64
-      path: build/libAIZ3N.so
-      if-no-files-found: error
-      retention-days: 30
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIZ3N-ARM64
+          path: build/libAIZ3N.so
+          if-no-files-found: error
+          retention-days: 30
