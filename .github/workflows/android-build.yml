@@ -31,7 +31,7 @@ jobs:
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: 23.2.8568313
+          ndk-version: r23c
           add-to-path: false
 
       - name: Install Build Dependencies
