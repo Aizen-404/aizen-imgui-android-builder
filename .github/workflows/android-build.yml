@@ -1,3 +1,4 @@
+
 name: AIZ3N Native ARM64 Build
 
 on:
@@ -34,6 +35,10 @@ jobs:
           ndk-version: r29
           add-to-path: false
 
+      - name: Configure Android NDK
+        run: |
+          echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
@@ -56,9 +61,15 @@ jobs:
           npm init -y
           npm install frida-il2cpp-bridge
           npm install --save-dev frida-compile
+
           mkdir -p build
+
           npx frida-compile agent.ts -o build/agent.js
+
           test -s build/agent.js
+
+          echo "Agent compilation successful."
+          ls -lh build/agent.js
 
       - name: Download Frida GumJS Devkit
         run: |
@@ -72,11 +83,17 @@ jobs:
           HEADER=$(find frida-devkit -name frida-gumjs.h -print -quit)
           LIBRARY=$(find frida-devkit -name libfrida-gumjs.a -print -quit)
 
-          test -n "$HEADER"
-          test -n "$LIBRARY"
+          if [ -z "$HEADER" ] || [ -z "$LIBRARY" ]; then
+            echo "ERROR: GumJS devkit files are missing."
+            find frida-devkit -maxdepth 4 -type f
+            exit 1
+          fi
 
           echo "GUMJS_INCLUDE=$(dirname "$HEADER")" >> "$GITHUB_ENV"
           echo "GUMJS_LIB=$(dirname "$LIBRARY")" >> "$GITHUB_ENV"
+
+          echo "GumJS header: $HEADER"
+          echo "GumJS library: $LIBRARY"
 
       - name: Convert Agent to Native Header
         run: |
@@ -107,6 +124,8 @@ jobs:
           )
           PY
 
+          test -s build/agent_blob.h
+
       - name: Create Native Initialization Source
         run: |
           cat > build/native.cpp <<'EOF'
@@ -125,7 +144,7 @@ jobs:
               GBytes* data,
               gpointer user_data
           ) {
-              LOGI("GumJS: %s", message);
+              LOGI("GumJS: %s", message != nullptr ? message : "(empty)");
           }
 
           static void* run_agent(void* arg) {
@@ -135,6 +154,11 @@ jobs:
 
               GumScriptBackend* backend =
                   gum_script_backend_obtain_qjs();
+
+              if (backend == nullptr) {
+                  LOGE("QuickJS backend unavailable.");
+                  return nullptr;
+              }
 
               GError* error = nullptr;
 
@@ -209,7 +233,7 @@ jobs:
 
       - name: Compile libaizen.so
         run: |
-          NDK="${{ steps.ndk.outputs.ndk-path }}"
+          NDK="$ANDROID_NDK_HOME"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
           test -x "$TOOLCHAIN/aarch64-linux-android24-clang++"
@@ -220,12 +244,12 @@ jobs:
             -fPIC \
             -O2 \
             -fvisibility=hidden \
+            -static-libstdc++ \
             -Ibuild \
             -I"$GUMJS_INCLUDE" \
             build/native.cpp \
             -L"$GUMJS_LIB" \
             -lfrida-gumjs \
-            -lc++_static \
             -llog \
             -landroid \
             -lz \
@@ -235,16 +259,36 @@ jobs:
             -Wl,--no-undefined \
             -o build/libaizen.so
 
-      - name: Verify Native Library
-        run: |
           test -s build/libaizen.so
 
-          file build/libaizen.so
+      - name: Verify Native Library
+        run: |
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          LIB="build/libaizen.so"
 
-          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
-            -h build/libaizen.so
+          test -s "$LIB"
 
-          ls -lh build/libaizen.so
+          echo "========== FILE =========="
+          file "$LIB"
+
+          echo "========== ELF HEADER =========="
+          "$TOOLCHAIN/llvm-readelf" -h "$LIB"
+
+          echo "========== ELF DEPENDENCIES =========="
+          "$TOOLCHAIN/llvm-readelf" -d "$LIB"
+
+          if "$TOOLCHAIN/llvm-readelf" -d "$LIB" | grep -q 'libc++_shared.so'; then
+            echo "ERROR: libc++_shared.so dependency detected."
+            exit 1
+          fi
+
+          echo "========== SYMBOL CHECK =========="
+          "$TOOLCHAIN/llvm-nm" -D --undefined-only "$LIB" || true
+
+          echo "========== RESULT =========="
+          echo "Static C++ runtime dependency check passed."
+
+          ls -lh "$LIB"
 
       - name: Upload Native Artifact
         uses: actions/upload-artifact@v4
