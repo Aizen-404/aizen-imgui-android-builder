@@ -82,132 +82,132 @@ jobs:
       - name: Convert Agent to Native Header
         run: |
           python3 - <<'PY'
-          from pathlib import Path
+from pathlib import Path
 
-          data = Path("build/agent.js").read_bytes()
+data = Path("build/agent.js").read_bytes()
 
-          lines = [
-              "#pragma once",
-              "static const unsigned char agent_js[] = {"
-          ]
+lines = [
+    "#pragma once",
+    "static const unsigned char agent_js[] = {"
+]
 
-          for i in range(0, len(data), 16):
-              chunk = data[i:i + 16]
-              lines.append("    " + ", ".join(
-                  f"0x{b:02x}" for b in chunk
-              ) + ",")
+for i in range(0, len(data), 16):
+    chunk = data[i:i + 16]
+    lines.append("    " + ", ".join(
+        f"0x{b:02x}" for b in chunk
+    ) + ",")
 
-          lines.extend([
-              "    0x00",
-              "};",
-              f"static const unsigned int agent_js_len = {len(data)};"
-          ])
+lines.extend([
+    "    0x00",
+    "};",
+    f"static const unsigned int agent_js_len = {len(data)};"
+])
 
-          Path("build/agent_blob.h").write_text(
-              "\n".join(lines) + "\n"
-          )
-          PY
+Path("build/agent_blob.h").write_text(
+    "\n".join(lines) + "\n"
+)
+PY
 
       - name: Create Native Initialization Source
         run: |
           cat > build/native.cpp <<'EOF'
-          #include <jni.h>
-          #include <android/log.h>
-          #include <pthread.h>
-          #include <frida-gumjs.h>
-          #include "agent_blob.h"
+#include <jni.h>
+#include <android/log.h>
+#include <pthread.h>
+#include <frida-gumjs.h>
+#include "agent_blob.h"
 
-          #define LOG_TAG "AIZ3N"
-          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-          #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOG_TAG "AIZ3N"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-          static void on_message(
-              GumScript* script,
-              const gchar* message,
-              GBytes* data,
-              gpointer user_data
-          ) {
-              LOGI("GumJS: %s", message);
-          }
+static void on_message(
+    GumScript* script,
+    const gchar* message,
+    GBytes* data,
+    gpointer user_data
+) {
+    LOGI("GumJS: %s", message);
+}
 
-          static void* run_agent(void* arg) {
-              LOGI("Initializing embedded GumJS...");
+static void* run_agent(void* arg) {
+    LOGI("Initializing embedded GumJS...");
 
-              gum_init_embedded();
+    gum_init_embedded();
 
-              GumScriptBackend* backend =
-                  gum_script_backend_obtain_qjs();
+    GumScriptBackend* backend =
+        gum_script_backend_obtain_qjs();
 
-              GError* error = nullptr;
+    GError* error = nullptr;
 
-              gchar* source = g_strndup(
-                  reinterpret_cast<const gchar*>(agent_js),
-                  agent_js_len
-              );
+    gchar* source = g_strndup(
+        reinterpret_cast<const gchar*>(agent_js),
+        agent_js_len
+    );
 
-              GumScript* script =
-                  gum_script_backend_create_sync(
-                      backend,
-                      "AIZ3N",
-                      source,
-                      nullptr,
-                      nullptr,
-                      &error
-                  );
+    GumScript* script =
+        gum_script_backend_create_sync(
+            backend,
+            "AIZ3N",
+            source,
+            nullptr,
+            nullptr,
+            &error
+        );
 
-              g_free(source);
+    g_free(source);
 
-              if (script == nullptr) {
-                  LOGE("Script creation failed: %s",
-                      error != nullptr ? error->message : "Unknown error");
+    if (script == nullptr) {
+        LOGE("Script creation failed: %s",
+            error != nullptr ? error->message : "Unknown error");
 
-                  if (error != nullptr)
-                      g_error_free(error);
+        if (error != nullptr)
+            g_error_free(error);
 
-                  return nullptr;
-              }
+        return nullptr;
+    }
 
-              gum_script_set_message_handler(
-                  script,
-                  on_message,
-                  nullptr,
-                  nullptr
-              );
+    gum_script_set_message_handler(
+        script,
+        on_message,
+        nullptr,
+        nullptr
+    );
 
-              gum_script_load_sync(script, nullptr);
+    gum_script_load_sync(script, nullptr);
 
-              LOGI("Embedded agent loaded successfully.");
+    LOGI("Embedded agent loaded successfully.");
 
-              GMainContext* context = g_main_context_default();
+    GMainContext* context = g_main_context_default();
 
-              while (true) {
-                  g_main_context_iteration(context, true);
-              }
+    while (true) {
+        g_main_context_iteration(context, true);
+    }
 
-              return nullptr;
-          }
+    return nullptr;
+}
 
-          extern "C" JNIEXPORT jint JNICALL
-          JNI_OnLoad(JavaVM* vm, void* reserved) {
-              LOGI("AIZ3N library loaded.");
+extern "C" JNIEXPORT jint JNICALL
+JNI_OnLoad(JavaVM* vm, void* reserved) {
+    LOGI("AIZ3N library loaded.");
 
-              pthread_t thread;
+    pthread_t thread;
 
-              if (pthread_create(
-                  &thread,
-                  nullptr,
-                  run_agent,
-                  nullptr
-              ) != 0) {
-                  LOGE("Failed to create runtime thread.");
-                  return JNI_ERR;
-              }
+    if (pthread_create(
+        &thread,
+        nullptr,
+        run_agent,
+        nullptr
+    ) != 0) {
+        LOGE("Failed to create runtime thread.");
+        return JNI_ERR;
+    }
 
-              pthread_detach(thread);
+    pthread_detach(thread);
 
-              return JNI_VERSION_1_6;
-          }
-          EOF
+    return JNI_VERSION_1_6;
+}
+EOF
 
       - name: Compile libaizen.so
         run: |
