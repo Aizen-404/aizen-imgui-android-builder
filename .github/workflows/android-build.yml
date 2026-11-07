@@ -1,5 +1,5 @@
 
-name: Build ImGuiAndroidVulkanHook
+name: AIZ3N Frida Build
 
 on:
   workflow_dispatch:
@@ -7,73 +7,43 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout builder
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Clone upstream repository
-        run: git clone --depth 1 https://github.com/Kaotic/ImGuiAndroidVulkanHook.git upstream
-
-      - name: Set up Java
-        uses: actions/setup-java@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          distribution: temurin
-          java-version: '17'
+          node-version: 22
+          cache: npm
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android packages
+      - name: Install Dependencies
         run: |
-          sdkmanager "platform-tools" "platforms;android-35" "ndk;23.2.8568313" "cmake;3.22.1"
+          npm init -y
+          npm install frida-il2cpp-bridge
+          npm install --save-dev frida-compile
 
-      - name: Install build tools
+      - name: Compile TypeScript Agent
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build python3
+          mkdir -p build
+          npx frida-compile agent.ts -o build/agent.js
 
-      - name: Fix std::size compatibility
-        working-directory: upstream
+      - name: Generate Embedded Agent Header
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("Menu/Menu.cpp")
-          s = p.read_text()
-          old = "std::size(pool_sizes)"
-          if old in s:
-              s = s.replace(old, "(sizeof(pool_sizes) / sizeof(pool_sizes[0]))")
-              p.write_text(s)
-          PY
+          xxd -i build/agent.js > build/agent.h
 
-      - name: Fix OpenGL ES linking
-        working-directory: upstream
-        run: |
-          grep -q 'target_link_libraries(Menu' CMakeLists.txt || true
-          printf '\ntarget_link_libraries(Menu PRIVATE GLESv3 EGL)\n' >> CMakeLists.txt
-
-      - name: Configure CMake
-        working-directory: upstream
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/23.2.8568313
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-24 \
-            -DANDROID_STL=c++_static \
-            -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        working-directory: upstream
-        run: cmake --build build --parallel 2
-
-      - name: Upload shared libraries
+      - name: Package Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ImGuiAndroidVulkanHook-arm64-v8a
-          path: upstream/build/**/*.so
+          name: AIZ3N-Agent-ARM64
+          path: |
+            build/agent.js
+            build/agent.h
           if-no-files-found: error
