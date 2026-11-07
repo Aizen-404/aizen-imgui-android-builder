@@ -25,9 +25,9 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git cmake ninja-build \
-            build-essential python3 python3-pip unzip wget \
-            pkg-config xxd
+          sudo apt-get install -y \
+            git cmake ninja-build build-essential \
+            python3 unzip wget xxd curl pkg-config
 
       - name: Install Android NDK
         run: |
@@ -37,7 +37,7 @@ jobs:
           unzip -q android-ndk-r23c-linux.zip
           echo "ANDROID_NDK_HOME=$HOME/android/android-ndk-r23c" >> "$GITHUB_ENV"
 
-      - name: Compile Agent
+      - name: Compile TypeScript
         run: |
           test -f agent.ts
           npm init -y
@@ -47,12 +47,23 @@ jobs:
           npx frida-compile agent.ts -o build/agent.js
           xxd -i build/agent.js > build/agent.h
 
-      - name: Fetch Frida Sources
+      - name: Download Frida GumJS ARM64 Devkit
         run: |
-          git clone --depth 1 --branch 17.11.0 \
-            https://github.com/frida/frida.git frida-source
-          git clone --depth 1 --branch 17.11.0 \
-            https://github.com/frida/frida-gum.git frida-source/frida-gum
+          VERSION=17.11.0
+          URL="https://github.com/frida/frida/releases/download/$VERSION/frida-gumjs-devkit-$VERSION-android-arm64.tar.xz"
+
+          mkdir -p "$HOME/frida-gumjs"
+
+          curl -fL "$URL" -o "$HOME/frida-gumjs/devkit.tar.xz"
+
+          tar -xJf "$HOME/frida-gumjs/devkit.tar.xz" \
+            -C "$HOME/frida-gumjs"
+
+          test -f "$HOME/frida-gumjs/frida-gumjs.h"
+          test -f "$HOME/frida-gumjs/libfrida-gumjs.a"
+
+          echo "FRIDA_GUMJS_INCLUDE_DIR=$HOME/frida-gumjs" >> "$GITHUB_ENV"
+          echo "FRIDA_GUMJS_LIBRARY=$HOME/frida-gumjs/libfrida-gumjs.a" >> "$GITHUB_ENV"
 
       - name: Generate Native Loader
         run: |
@@ -68,16 +79,22 @@ jobs:
 
           static GumScript *script = nullptr;
 
-          static void on_message(GumScript *, const gchar *message,
-                                 GBytes *, gpointer) {
+          static void on_message(
+              GumScript *,
+              const gchar *message,
+              GBytes *,
+              gpointer
+          ) {
               LOGI("%s", message);
           }
 
           static void *initialize(void *) {
               GError *error = nullptr;
+
               gum_init_embedded();
 
               GumScriptBackend *backend = gum_script_backend_obtain_qjs();
+
               if (!backend) {
                   LOGE("QuickJS backend unavailable");
                   return nullptr;
@@ -89,37 +106,52 @@ jobs:
               );
 
               script = gum_script_backend_create_sync(
-                  backend, "AIZ3N", source.c_str(),
-                  nullptr, nullptr, &error
+                  backend,
+                  "AIZ3N",
+                  source.c_str(),
+                  nullptr,
+                  nullptr,
+                  &error
               );
 
               if (!script) {
                   LOGE("Script creation failed: %s",
-                       error ? error->message : "unknown");
-                  if (error) g_error_free(error);
+                      error ? error->message : "unknown");
+
+                  if (error)
+                      g_error_free(error);
+
                   return nullptr;
               }
 
               gum_script_set_message_handler(
-                  script, on_message, nullptr, nullptr
+                  script,
+                  on_message,
+                  nullptr,
+                  nullptr
               );
 
               gum_script_load_sync(script, nullptr);
-              LOGI("Agent loaded");
+
+              LOGI("AIZ3N agent loaded");
+
               return nullptr;
           }
 
           __attribute__((constructor))
           static void start() {
               pthread_t thread;
-              if (pthread_create(&thread, nullptr, initialize, nullptr) == 0)
+
+              if (pthread_create(&thread, nullptr, initialize, nullptr) == 0) {
                   pthread_detach(thread);
-              else
+                  LOGI("Native initialization started");
+              } else {
                   LOGE("Thread creation failed");
+              }
           }
           EOF
 
-      - name: Generate CMake
+      - name: Generate CMake Configuration
         run: |
           cat > native/CMakeLists.txt <<'EOF'
           cmake_minimum_required(VERSION 3.22)
@@ -127,16 +159,9 @@ jobs:
 
           set(CMAKE_CXX_STANDARD 17)
           set(CMAKE_CXX_STANDARD_REQUIRED ON)
+          set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-          if(NOT DEFINED FRIDA_GUMJS_INCLUDE_DIR)
-              message(FATAL_ERROR "A compatible Frida GumJS SDK is required")
-          endif()
-
-          if(NOT DEFINED FRIDA_GUMJS_LIBRARY)
-              message(FATAL_ERROR "A compatible Frida GumJS library is required")
-          endif()
-
-          add_library(AIZ3N SHARED loader.cpp ../build/agent.h)
+          add_library(AIZ3N SHARED loader.cpp)
 
           target_include_directories(AIZ3N PRIVATE
               "${FRIDA_GUMJS_INCLUDE_DIR}"
@@ -148,23 +173,44 @@ jobs:
               log
               android
               dl
+              m
+              z
+              resolv
           )
 
           set_target_properties(AIZ3N PROPERTIES
               OUTPUT_NAME AIZ3N
+              LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out"
           )
           EOF
 
-      - name: Configure Native Build
+      - name: Build ARM64 Library
         run: |
-          echo "A compatible Android GumJS SDK/library must be supplied."
-          echo "The upstream source checkout alone is not a prebuilt SDK."
-          exit 1
+          cmake -S native -B build/native -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_static
 
-      - name: Upload Final Library
-        if: success()
+          cmake --build build/native --parallel 2
+
+      - name: Verify Library
+        run: |
+          LIB=build/native/out/libAIZ3N.so
+
+          test -s "$LIB"
+          file "$LIB"
+          readelf -h "$LIB" | grep -E 'Class:|Machine:'
+          readelf -d "$LIB"
+
+          mkdir -p release
+          cp "$LIB" release/libAIZ3N.so
+
+      - name: Upload Final SO Only
         uses: actions/upload-artifact@v4
         with:
           name: AIZ3N-ARM64
           path: release/libAIZ3N.so
           if-no-files-found: error
+          retention-days: 30
